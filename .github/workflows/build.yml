@@ -1,0 +1,677 @@
+name: Build-WeChat-Twitter-Dylib-Final
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos & SDKs
+        run: |
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "PERL5LIB=$HOME/theos/lib" >> $GITHUB_ENV
+          git clone https://github.com/theos/sdks.git ~/theos/sdks
+          brew install ldid
+
+      - name: Create lightweight substrate header
+        run: |
+          mkdir -p sub
+          cat > sub/substrate.h << 'EOF'
+          #ifndef SUBSTRATE_H_
+          #define SUBSTRATE_H_
+          #include <objc/runtime.h>
+          void MSHookMessageEx(Class cls, SEL sel, IMP imp, IMP *result);
+          void MSHookIvar(id obj, const char *name, void *val);
+          #endif
+          EOF
+          echo "CPATH=$(pwd)/sub:$CPATH" >> $GITHUB_ENV
+
+      - name: Write complete Tweak.xm (fixed)
+        run: |
+          cat > Tweak.xm << 'TWEAKEOF'
+          // 私有类声明，避免编译报错
+          @interface ChatInputView : UIView @end
+          @interface MMUILabel : UILabel @end
+          @interface MMNavigationItem : UINavigationItem @end
+          @interface MMUIButton : UIButton @end
+
+          #import <substrate.h>
+          #import <UIKit/UIKit.h>
+          #import <objc/runtime.h>
+
+          #define TWITTER_BLUE [UIColor colorWithRed:0.12 green:0.6 blue:1 alpha:1]
+          #define TWITTER_BG_LIGHT [UIColor whiteColor]
+          #define TWITTER_BG_DARK [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:1]
+          #define SIDEBAR_WIDTH ([UIScreen mainScreen].bounds.size.width * 0.85)
+          #define ANIM_DURATION 0.4
+          #define SPRING_DAMPING 0.7
+          #define INITIAL_VELOCITY 0.5
+
+          #define TWITTER_DYNAMIC_COLOR(light, dark) [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traitCollection) { \
+              return traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark ? dark : light; \
+          }]
+
+          typedef NS_ENUM(NSUInteger, ThemeMode) {
+              ThemeModeSystem, ThemeModeLight, ThemeModeDark
+          };
+          typedef NS_ENUM(NSUInteger, TwitterPageType) {
+              TwitterPageHome, TwitterPageFollowing, TwitterPageMessages, TwitterPageNotifications, TwitterPageProfile
+          };
+
+          static ThemeMode currentTheme = ThemeModeSystem;
+          static NSDictionary *langMap = nil;
+          static NSString *g_wechatLang = @"en";
+
+          static void initLang();
+          static NSString* getText(NSString *key);
+          static void springAnim(UIView *v, CGRect f, void(^cb)(void));
+
+          static void initLang() {
+              static dispatch_once_t once;
+              dispatch_once(&once, ^{
+                  langMap = @{
+                      @"zh-Hans": @{@"朋友圈":@"Home",@"通讯录":@"Following",@"聊天":@"Messages",@"我":@"Profile",@"设置":@"Settings",@"收藏":@"Bookmarks",@"微信支付":@"WeChatPay",@"插件":@"Plugins",@"发现":@"Explore"},
+                      @"en": @{@"Home":@"Home",@"Following":@"Following",@"Messages":@"Messages",@"Profile":@"Profile",@"Settings":@"Settings"},
+                      @"zh-Hant": @{@"朋友圈":@"首頁",@"通訊錄":@"關注",@"聊天":@"訊息"},
+                      @"ja": @{@"朋友圈":@"ホーム",@"通訊錄":@"フォロー",@"聊天":@"メッセージ"},
+                      @"ko": @{@"朋友圈":@"홈",@"通訊錄":@"팔로잉",@"聊天":@"메시지"},
+                      @"es": @{@"朋友圈":@"Inicio",@"通訊錄":@"Siguiendo"},
+                      @"fr": @{@"朋友圈":@"Accueil",@"通訊錄":@"Suivi"},
+                      @"de": @{@"朋友圈":@"Startseite",@"通訊錄":@"Folgen"},
+                      @"it": @{@"朋友圈":@"Home",@"通訊錄":@"Seguiti"},
+                      @"pt": @{@"朋友圈":@"Início",@"通訊錄":@"Seguindo"},
+                      @"ru": @{@"朋友圈":@"Главная",@"通訊錄":@"Подписки"},
+                      @"ar": @{@"朋友圈":@"الرئيسية",@"通訊錄":@"متابعة"},
+                      @"tr": @{@"朋友圈":@"Ana Sayfa",@"通訊錄":@"Takip"},
+                      @"vi": @{@"朋友圈":@"Trang chủ",@"通訊錄":@"Theo dõi"},
+                      @"th": @{@"朋友圈":@"หน้าแรก",@"通訊錄":@"ติดตาม"},
+                      @"id": @{@"朋友圈":@"Beranda",@"通訊錄":@"Mengikuti"},
+                      @"ms": @{@"朋友圈":@"Laman Utama",@"通訊錄":@"Ikuti"},
+                      @"nl": @{@"朋友圈":@"Home",@"通訊錄":@"Volgen"},
+                      @"sv": @{@"朋友圈":@"Hem",@"通訊錄":@"Följer"},
+                      @"pl": @{@"朋友圈":@"Strona główna",@"通訊錄":@"Obserwowani"},
+                      @"uk": @{@"朋友圈":@"Головна",@"通訊錄":@"Підписки"}
+                  };
+                  g_wechatLang = [[NSUserDefaults standardUserDefaults] stringForKey:@"WeChatX_Lang"] ?: @"en";
+              });
+          }
+          static NSString* getText(NSString *key) {
+              NSDictionary *map = langMap[g_wechatLang] ?: langMap[@"en"];
+              return map[key] ?: key;
+          }
+          static void springAnim(UIView *v, CGRect f, void(^cb)(void)) {
+              [UIView animateWithDuration:ANIM_DURATION delay:0 usingSpringWithDamping:SPRING_DAMPING initialSpringVelocity:INITIAL_VELOCITY options:0 animations:^{
+                  v.frame = f;
+              } completion:^(BOOL ok){ if(cb)cb(); }];
+          }
+
+          @interface Tweet : NSObject
+          @property (nonatomic, strong) NSString *username;
+          @property (nonatomic, strong) NSString *content;
+          @property (nonatomic, strong) NSString *time;
+          @property (nonatomic, assign) NSInteger likes;
+          @property (nonatomic, assign) NSInteger retweets;
+          @end
+          @implementation Tweet
+          @end
+
+          @interface TweetCell : UITableViewCell
+          @property (nonatomic, strong) UIImageView *avatarView;
+          @property (nonatomic, strong) UILabel *nameLabel, *usernameLabel, *contentLabel, *timeLabel;
+          @property (nonatomic, strong) UIButton *replyBtn, *retweetBtn, *likeBtn, *shareBtn;
+          - (void)configureWithTweet:(Tweet *)tweet;
+          @end
+          @implementation TweetCell
+          - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+              self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+              if(!self) return nil;
+              self.backgroundColor = UIColor.clearColor;
+              self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+              self.avatarView = [[UIImageView alloc] initWithFrame:CGRectMake(15,15,44,44)];
+              self.avatarView.layer.cornerRadius = 22;
+              self.avatarView.clipsToBounds = YES;
+              self.avatarView.image = [UIImage systemImageNamed:@"person.circle.fill"];
+              [self.contentView addSubview:self.avatarView];
+
+              self.nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(70,12,180,22)];
+              self.nameLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
+              [self.contentView addSubview:self.nameLabel];
+
+              self.usernameLabel = [[UILabel alloc] initWithFrame:CGRectMake(255,12,80,22)];
+              self.usernameLabel.font = [UIFont systemFontOfSize:14];
+              self.usernameLabel.textColor = UIColor.secondaryLabelColor;
+              [self.contentView addSubview:self.usernameLabel];
+
+              self.timeLabel = [[UILabel alloc] initWithFrame:CGRectMake(self.bounds.size.width-80,12,70,22)];
+              self.timeLabel.font = [UIFont systemFontOfSize:14];
+              self.timeLabel.textColor = UIColor.secondaryLabelColor;
+              self.timeLabel.textAlignment = NSTextAlignmentRight;
+              [self.contentView addSubview:self.timeLabel];
+
+              self.contentLabel = [[UILabel alloc] initWithFrame:CGRectMake(70,40,self.bounds.size.width-85,0)];
+              self.contentLabel.numberOfLines = 0;
+              self.contentLabel.font = [UIFont systemFontOfSize:16];
+              [self.contentView addSubview:self.contentLabel];
+
+              CGFloat btnY = self.bounds.size.height - 40;
+              self.replyBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+              self.replyBtn.frame = CGRectMake(70,btnY,60,30);
+              [self.replyBtn setImage:[UIImage systemImageNamed:@"bubble.left"] forState:UIControlStateNormal];
+              self.replyBtn.tintColor = UIColor.systemGrayColor;
+              [self.contentView addSubview:self.replyBtn];
+
+              self.retweetBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+              self.retweetBtn.frame = CGRectMake(140,btnY,60,30);
+              [self.retweetBtn setImage:[UIImage systemImageNamed:@"arrow.2.squarepath"] forState:UIControlStateNormal];
+              self.retweetBtn.tintColor = UIColor.systemGreenColor;
+              [self.contentView addSubview:self.retweetBtn];
+
+              self.likeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+              self.likeBtn.frame = CGRectMake(210,btnY,60,30);
+              [self.likeBtn setImage:[UIImage systemImageNamed:@"heart"] forState:UIControlStateNormal];
+              self.likeBtn.tintColor = UIColor.systemRedColor;
+              [self.contentView addSubview:self.likeBtn];
+
+              self.shareBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+              self.shareBtn.frame = CGRectMake(280,btnY,60,30);
+              [self.shareBtn setImage:[UIImage systemImageNamed:@"square.and.arrow.up"] forState:UIControlStateNormal];
+              self.shareBtn.tintColor = TWITTER_BLUE;
+              [self.contentView addSubview:self.shareBtn];
+
+              return self;
+          }
+          - (void)configureWithTweet:(Tweet *)tweet {
+              self.nameLabel.text = tweet.username;
+              self.usernameLabel.text = @"";
+              self.contentLabel.text = tweet.content;
+              self.timeLabel.text = tweet.time;
+              
+              CGSize s = [self.contentLabel sizeThatFits:CGSizeMake(self.contentLabel.bounds.size.width, 9999)];
+              CGRect f = self.contentLabel.frame;
+              f.size.height = s.height;
+              self.contentLabel.frame = f;
+              
+              CGFloat btnY = CGRectGetMaxY(self.contentLabel.frame) + 12;
+              self.replyBtn.frame = CGRectMake(70,btnY,60,30);
+              self.retweetBtn.frame = CGRectMake(140,btnY,60,30);
+              self.likeBtn.frame = CGRectMake(210,btnY,60,30);
+              self.shareBtn.frame = CGRectMake(280,btnY,60,30);
+              
+              self.bounds = CGRectMake(0,0,self.bounds.size.width, btnY + 40);
+          }
+          @end
+
+          @interface ComposeTweetVC : UIViewController
+          @property (nonatomic, strong) UITextView *tv;
+          @property (nonatomic, copy) void (^onTweetPosted)(Tweet *tweet);
+          @end
+          @implementation ComposeTweetVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.title = @"New Post";
+              self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Cancel" style:UIBarButtonItemStylePlain target:self action:@selector(cancel)];
+              self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Post" style:UIBarButtonItemStyleDone target:self action:@selector(post)];
+              self.tv = [[UITextView alloc] initWithFrame:CGRectMake(15,100,self.view.bounds.size.width-30,200)];
+              self.tv.font = [UIFont systemFontOfSize:18];
+              self.tv.backgroundColor = UIColor.clearColor;
+              self.tv.textColor = TWITTER_DYNAMIC_COLOR(UIColor.blackColor, UIColor.whiteColor);
+              [self.view addSubview:self.tv];
+          }
+          - (void)cancel { [self dismissViewControllerAnimated:YES completion:nil]; }
+          - (void)post {
+              Tweet *t = [[Tweet alloc] init];
+              t.username = @"Me";
+              t.content = self.tv.text;
+              t.time = @"now";
+              t.likes = 0; t.retweets = 0;
+              if(self.onTweetPosted) self.onTweetPosted(t);
+              [self dismissViewControllerAnimated:YES completion:nil];
+          }
+          @end
+
+          @interface TwitterHomeVC : UIViewController <UITableViewDataSource, UITableViewDelegate>
+          @property (nonatomic, strong) UITableView *table;
+          @property (nonatomic, strong) NSMutableArray *tweets;
+          - (void)loadSample;
+          @end
+          @implementation TwitterHomeVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.title = getText(@"Home");
+              self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCompose target:self action:@selector(compose)];
+
+              self.table = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+              self.table.dataSource = self;
+              self.table.delegate = self;
+              self.table.backgroundColor = UIColor.clearColor;
+              self.table.rowHeight = UITableViewAutomaticDimension;
+              self.table.estimatedRowHeight = 100;
+              [self.view addSubview:self.table];
+
+              [self loadSample];
+              [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTheme) name:@"TwitterThemeChanged" object:nil];
+          }
+          - (void)updateTheme {
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.table.backgroundColor = self.view.backgroundColor;
+          }
+          - (void)loadSample {
+              self.tweets = [NSMutableArray array];
+              NSArray *samples = @[
+                  @{@"u":@"Elon Musk",@"txt":@"Just sent some Tesla cars to Mars!",@"t":@"2h"},
+                  @{@"u":@"Tim Cook",@"txt":@"Excited to announce new iPhone AI features",@"t":@"4h"},
+                  @{@"u":@"Bill Gates",@"txt":@"Climate change is our biggest challenge.",@"t":@"6h"}
+              ];
+              for(NSDictionary *d in samples){
+                  Tweet *tw = [[Tweet alloc] init];
+                  tw.username = d[@"u"]; tw.content = d[@"txt"]; tw.time = d[@"t"]; tw.likes=0; tw.retweets=0;
+                  [self.tweets addObject:tw];
+              }
+              [self.table reloadData];
+          }
+          - (void)compose {
+              ComposeTweetVC *vc = [[ComposeTweetVC alloc] init];
+              __weak typeof(self) weakSelf = self;
+              vc.onTweetPosted = ^(Tweet *tw){
+                  __strong typeof(weakSelf) strongSelf = weakSelf;
+                  if (!strongSelf) return;
+                  [strongSelf.tweets insertObject:tw atIndex:0];
+                  [strongSelf.table reloadData];
+              };
+              UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+              [self presentViewController:nav animated:YES completion:nil];
+          }
+          - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.tweets.count; }
+          - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+              TweetCell *c = [tableView dequeueReusableCellWithIdentifier:@"tc"];
+              if(!c) c = [[TweetCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"tc"];
+              [c configureWithTweet:self.tweets[indexPath.row]];
+              return c;
+          }
+          - (void)dealloc {
+              [[NSNotificationCenter defaultCenter] removeObserver:self];
+          }
+          @end
+
+          @interface TwitterFollowingVC : UIViewController @end
+          @implementation TwitterFollowingVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.title = getText(@"Following");
+              [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTheme) name:@"TwitterThemeChanged" object:nil];
+          }
+          - (void)updateTheme { self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK); }
+          - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+          @end
+
+          @interface TwitterMessagesVC : UIViewController @end
+          @implementation TwitterMessagesVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.title = getText(@"Messages");
+              [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTheme) name:@"TwitterThemeChanged" object:nil];
+          }
+          - (void)updateTheme { self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK); }
+          - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+          @end
+
+          @interface TwitterNotificationsVC : UIViewController @end
+          @implementation TwitterNotificationsVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.title = getText(@"Notifications");
+              [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTheme) name:@"TwitterThemeChanged" object:nil];
+          }
+          - (void)updateTheme { self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK); }
+          - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+          @end
+
+          @interface TwitterProfileVC : UIViewController @end
+          @implementation TwitterProfileVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.title = getText(@"Profile");
+              [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTheme) name:@"TwitterThemeChanged" object:nil];
+          }
+          - (void)updateTheme { self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK); }
+          - (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+          @end
+
+          static UIViewController* createTwitterVC(TwitterPageType page){
+              UIViewController *vc = nil;
+              switch(page){
+                  case TwitterPageHome: vc = [[TwitterHomeVC alloc] init]; break;
+                  case TwitterPageFollowing: vc = [[TwitterFollowingVC alloc] init]; break;
+                  case TwitterPageMessages: vc = [[TwitterMessagesVC alloc] init]; break;
+                  case TwitterPageNotifications: vc = [[TwitterNotificationsVC alloc] init]; break;
+                  case TwitterPageProfile: vc = [[TwitterProfileVC alloc] init]; break;
+              }
+              return [[UINavigationController alloc] initWithRootViewController:vc];
+          }
+
+          @interface TwitterSidebar : UIViewController<UITableViewDataSource,UITableViewDelegate>
+          @property (nonatomic, assign) BOOL isDrawer;
+          @property (nonatomic, strong) UIView *sideView;
+          @property (nonatomic, strong) UITableView *menuTable;
+          @property (nonatomic, strong) NSArray *menuTexts;
+          @property (nonatomic, strong) NSArray *icons;
+          @property (nonatomic, strong) NSArray *pageTypes;
+          @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *edgePan;
+          + (instancetype)shared;
+          - (void)show;
+          - (void)hide;
+          - (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)gesture;
+          @end
+          @implementation TwitterSidebar
+          static TwitterSidebar *g_sidebar = nil;
+          + (instancetype)shared {
+              static dispatch_once_t onceToken;
+              dispatch_once(&onceToken, ^{
+                  g_sidebar = [[self alloc] initWithDrawer:YES];
+              });
+              return g_sidebar;
+          }
+          - (instancetype)initWithDrawer:(BOOL)drawer {
+              self = [super init];
+              if(self){
+                  _isDrawer = drawer;
+                  _menuTexts = @[@"Moments",@"Plugins",@"Messages",@"WeChatPay",@"Bookmarks",@"Profile",@"Settings"];
+                  _icons = @[@"person.circle",@"gear",@"envelope",@"creditcard",@"bookmark",@"person",@"gear"];
+                  _pageTypes = @[@(TwitterPageHome),@(TwitterPageNotifications),@(TwitterPageMessages),@(TwitterPageFollowing),@(TwitterPageNotifications),@(TwitterPageProfile),@(TwitterPageNotifications)];
+              }
+              return self;
+          }
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              CGRect f = self.isDrawer ? CGRectMake(-SIDEBAR_WIDTH,0,SIDEBAR_WIDTH,self.view.bounds.size.height) : CGRectMake(0,0,SIDEBAR_WIDTH,self.view.bounds.size.height);
+              self.sideView = [[UIView alloc] initWithFrame:f];
+              self.sideView.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:1]);
+              self.sideView.layer.shadowColor = UIColor.black.CGColor;
+              self.sideView.layer.shadowOpacity = 0.22;
+              self.sideView.layer.shadowRadius = 14;
+
+              self.menuTable = [[UITableView alloc] initWithFrame:CGRectMake(0,60,SIDEBAR_WIDTH,self.view.bounds.size.height-120) style:UITableViewStylePlain];
+              self.menuTable.dataSource = self;
+              self.menuTable.delegate = self;
+              self.menuTable.backgroundColor = UIColor.clearColor;
+              self.menuTable.separatorStyle = UITableViewCellSeparatorStyleNone;
+              self.menuTable.rowHeight = 60;
+
+              UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0,self.sideView.bounds.size.height-60,SIDEBAR_WIDTH,60)];
+              bar.backgroundColor = self.sideView.backgroundColor;
+              NSArray *btns = @[@"Sys",@"Light",@"Dark",@"Lang"];
+              CGFloat w = SIDEBAR_WIDTH/4;
+              for(int i=0;i<4;i++){
+                  UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+                  b.frame = CGRectMake(i*w,0,w,60);
+                  [b setTitle:btns[i] forState:UIControlStateNormal];
+                  b.tag = i;
+                  b.titleLabel.font = [UIFont systemFontOfSize:12];
+                  [b addTarget:self action:@selector(clickBottom:) forControlEvents:UIControlEventTouchUpInside];
+                  [bar addSubview:b];
+              }
+              [self.sideView addSubview:bar];
+              [self.view addSubview:self.sideView];
+          }
+          - (void)clickBottom:(UIButton *)s {
+              switch(s.tag){
+                  case 0: currentTheme = ThemeModeSystem; break;
+                  case 1: currentTheme = ThemeModeLight; break;
+                  case 2: currentTheme = ThemeModeDark; break;
+                  case 3: g_wechatLang = ([g_wechatLang isEqualToString:@"en"]) ? @"zh-Hans" : @"en";
+                          [[NSUserDefaults standardUserDefaults] setObject:g_wechatLang forKey:@"WeChatX_Lang"];
+                          break;
+              }
+              [[NSUserDefaults standardUserDefaults] setInteger:currentTheme forKey:@"TwitterThemeMode"];
+              [[NSUserDefaults standardUserDefaults] synchronize];
+              [[NSNotificationCenter defaultCenter] postNotificationName:@"TwitterThemeChanged" object:nil];
+          }
+          - (void)show{ springAnim(self.sideView,CGRectMake(0,0,SIDEBAR_WIDTH,self.view.bounds.size.height),nil); }
+          - (void)hide{ springAnim(self.sideView,CGRectMake(-SIDEBAR_WIDTH,0,SIDEBAR_WIDTH,self.view.bounds.size.height),nil); }
+          - (void)handleEdgePan:(UIScreenEdgePanGestureRecognizer *)gesture {
+              if (gesture.state == UIGestureRecognizerStateBegan) [self show];
+          }
+          - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section{return self.menuTexts.count;}
+          - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath{
+              UITableViewCell *c = [tableView dequeueReusableCellWithIdentifier:@"sidebarCell"];
+              if(!c) c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"sidebarCell"];
+              c.backgroundColor = UIColor.clearColor;
+              c.textLabel.text = self.menuTexts[indexPath.row];
+              c.imageView.image = [UIImage systemImageNamed:self.icons[indexPath.row]];
+              return c;
+          }
+          - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath{
+              [tableView deselectRowAtIndexPath:indexPath animated:YES];
+              TwitterPageType t = [self.pageTypes[indexPath.row] integerValue];
+              UIViewController *vc = createTwitterVC(t);
+              [self presentViewController:vc animated:YES completion:nil];
+              [self hide];
+          }
+          @end
+
+          @interface TwitterMainVC : UIViewController <UITabBarDelegate>
+          @property (nonatomic, strong) UITabBar *tabBar;
+          @property (nonatomic, strong) UIButton *postBtn;
+          @property (nonatomic, strong) NSArray *viewControllers;
+          @property (nonatomic, assign) NSInteger selectedIndex;
+          @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *edgePan;
+          @end
+          @implementation TwitterMainVC
+          - (void)viewDidLoad {
+              [super viewDidLoad];
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.selectedIndex = 0;
+              
+              [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateTheme) name:@"TwitterThemeChanged" object:nil];
+
+              self.tabBar = [[UITabBar alloc] initWithFrame:CGRectMake(0,self.view.bounds.size.height-50,self.view.bounds.size.width,50)];
+              self.tabBar.barTintColor = self.view.backgroundColor;
+              NSArray *icons = @[@"house.fill",@"person.2.fill",@"envelope.fill",@"bell.fill",@"person.circle.fill"];
+              NSArray *titles = @[@"Home",@"Following",@"Messages",@"Notifications",@"Profile"];
+              NSMutableArray *items = [NSMutableArray array];
+              for(int i=0;i<5;i++){
+                  UITabBarItem *it = [[UITabBarItem alloc] initWithTitle:titles[i] image:[UIImage systemImageNamed:icons[i]] tag:i];
+                  [items addObject:it];
+              }
+              self.tabBar.items = items;
+              self.tabBar.selectedItem = items[0];
+              self.tabBar.delegate = self;
+              [self.view addSubview:self.tabBar];
+
+              self.postBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+              self.postBtn.frame = CGRectMake(self.view.bounds.size.width-75,self.view.bounds.size.height-130,60,60);
+              self.postBtn.backgroundColor = TWITTER_BLUE;
+              self.postBtn.layer.cornerRadius = 30;
+              [self.postBtn setImage:[UIImage systemImageNamed:@"plus"] forState:UIControlStateNormal];
+              [self.postBtn addTarget:self action:@selector(openCompose) forControlEvents:UIControlEventTouchUpInside];
+              [self.view addSubview:self.postBtn];
+
+              self.viewControllers = @[
+                  createTwitterVC(TwitterPageHome),
+                  createTwitterVC(TwitterPageFollowing),
+                  createTwitterVC(TwitterPageMessages),
+                  createTwitterVC(TwitterPageNotifications),
+                  createTwitterVC(TwitterPageProfile)
+              ];
+              [self switchToIndex:0];
+              
+              static dispatch_once_t once;
+              dispatch_once(&once, ^{
+                  TwitterSidebar *sidebar = [TwitterSidebar shared];
+                  [self addChildViewController:sidebar];
+                  [self.view addSubview:sidebar.view];
+                  sidebar.view.frame = self.view.bounds;
+                  
+                  self.edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:sidebar action:@selector(handleEdgePan:)];
+                  self.edgePan.edges = UIRectEdgeLeft;
+                  [self.view addGestureRecognizer:self.edgePan];
+              });
+          }
+          - (void)openCompose {
+              ComposeTweetVC *vc = [[ComposeTweetVC alloc] init];
+              __weak typeof(self) weakSelf = self;
+              vc.onTweetPosted = ^(Tweet *tw){
+                  __strong typeof(weakSelf) strongSelf = weakSelf;
+                  if(!strongSelf) return;
+                  UINavigationController *homeNav = strongSelf.viewControllers[0];
+                  TwitterHomeVC *home = (TwitterHomeVC *)homeNav.topViewController;
+                  if([home isKindOfClass:[TwitterHomeVC class]]){
+                      [home.tweets insertObject:tw atIndex:0];
+                      [home.table reloadData];
+                  }
+              };
+              UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+              [self presentViewController:nav animated:YES completion:nil];
+          }
+          - (void)switchToIndex:(NSInteger)idx {
+              for(UIViewController *vc in self.viewControllers){
+                  [vc.view removeFromSuperview];
+              }
+              UIViewController *targetVC = self.viewControllers[idx];
+              targetVC.view.frame = CGRectMake(0,0,self.view.bounds.size.width,self.view.bounds.size.height-50);
+              [self.view insertSubview:targetVC.view belowSubview:self.tabBar];
+          }
+          - (void)updateTheme {
+              self.view.backgroundColor = TWITTER_DYNAMIC_COLOR(TWITTER_BG_LIGHT, TWITTER_BG_DARK);
+              self.tabBar.barTintColor = self.view.backgroundColor;
+          }
+          #pragma mark - UITabBarDelegate
+          - (void)tabBar:(UITabBar *)tabBar didSelectItem:(UITabBarItem *)item {
+              NSInteger idx = item.tag;
+              [UIView transitionWithView:self.view duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+                  [self switchToIndex:idx];
+              } completion:nil];
+              
+              static NSInteger lastTag = -1;
+              static NSTimeInterval lastTap = 0;
+              NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+              if(lastTag == idx && now - lastTap < 0.3){
+                  TwitterHomeVC *home = (TwitterHomeVC *)[(UINavigationController *)self.viewControllers[idx] topViewController];
+                  if([home isKindOfClass:[TwitterHomeVC class]]){
+                      [home loadSample];
+                      [home.table reloadData];
+                  }
+              }
+              lastTag = idx;
+              lastTap = now;
+          }
+          @end
+
+          %hook UIWindow
+          - (void)makeKeyAndVisible {
+              %orig;
+              UIWindow *mainWindow = UIApplication.sharedApplication.windows.firstObject;
+              if(self != mainWindow) return;
+              
+              static dispatch_once_t once;
+              dispatch_once(&once, ^{
+                  TwitterMainVC *twitterVC = [[TwitterMainVC alloc] init];
+                  self.rootViewController = twitterVC;
+                  
+                  UIButton *backBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+                  backBtn.frame = CGRectMake(20, 50, 44, 44);
+                  backBtn.backgroundColor = [UIColor systemGreenColor];
+                  backBtn.layer.cornerRadius = 22;
+                  backBtn.layer.shadowColor = UIColor.blackColor.CGColor;
+                  backBtn.layer.shadowOpacity = 0.3;
+                  backBtn.layer.shadowRadius = 4;
+                  [backBtn setTitle:@"微" forState:UIControlStateNormal];
+                  backBtn.titleLabel.font = [UIFont boldSystemFontOfSize:18];
+                  backBtn.tag = 9527;
+                  backBtn.accessibilityLabel = @"backToWeChat";
+                  [backBtn addTarget:self action:@selector(switchBackWeChat) forControlEvents:UIControlEventTouchUpInside];
+                  [self addSubview:backBtn];
+              });
+          }
+          %new
+          - (void)switchBackWeChat {
+              UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"返回微信" message:@"恢复原生微信界面" preferredStyle:UIAlertControllerStyleAlert];
+              [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+              [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                  Class cls = NSClassFromString(@"BaseTabBarController");
+                  if(cls) self.rootViewController = [[cls alloc] init];
+                  [[NSNotificationCenter defaultCenter] postNotificationName:@"BackToWeChatDone" object:nil];
+              }]];
+              [self.rootViewController presentViewController:alert animated:YES completion:nil];
+          }
+          %end
+
+          %hook ChatInputView
+          - (void)layoutSubviews {
+              %orig;
+              self.hidden = YES;
+          }
+          %end
+
+          %hook MMUILabel
+          - (void)setText:(NSString *)text { %orig(getText(text)); }
+          %end
+          %hook MMNavigationItem
+          - (void)setTitle:(NSString *)title { %orig(getText(title)); }
+          %end
+          %hook MMUIButton
+          - (void)setTitle:(NSString *)title forState:(UIControlState)state { %orig(getText(title), state); }
+          %end
+
+          %ctor {
+              @try {
+                  initLang();
+                  currentTheme = [[NSUserDefaults standardUserDefaults] integerForKey:@"TwitterThemeMode"];
+                  if(currentTheme == 0) currentTheme = ThemeModeSystem;
+                  
+                  [[NSNotificationCenter defaultCenter] addObserverForName:@"BackToWeChatDone" object:nil queue:nil usingBlock:^(NSNotification *note) {
+                      UIWindow *keyWin = UIApplication.sharedApplication.windows.firstObject;
+                      for (UIView *subview in keyWin.subviews) {
+                          if (subview.tag == 9527 && [subview isKindOfClass:[UIButton class]]) {
+                              [subview removeFromSuperview];
+                              break;
+                          }
+                      }
+                  }];
+              } @catch(NSException *e) { NSLog(@"TwitterX init err: %@",e); }
+          }
+          TWEAKEOF
+
+      - name: Convert Logos → ObjC++
+        env:
+          THEOS: ${{ env.THEOS }}
+          PERL5LIB: ${{ env.PERL5LIB }}
+        run: |
+          perl $THEOS/bin/logos.pl Tweak.xm > Tweak.mm
+          test -s Tweak.mm || { echo "Logos conversion failed"; exit 1; }
+
+      - name: Compile dylib
+        run: |
+          SDK=$(find ~/theos/sdks -name "*.sdk" | head -1)
+          clang++ \
+            -arch arm64 \
+            -dynamiclib \
+            Tweak.mm \
+            -o libWeChatTwitter.dylib \
+            -fobjc-arc \
+            -ObjC \
+            -isysroot "$SDK" \
+            -target arm64-apple-ios15.0 \
+            -framework UIKit \
+            -framework Foundation \
+            -framework CoreGraphics \
+            -I./sub \
+            -undefined dynamic_lookup \
+            -install_name @rpath/libWeChatTwitter.dylib
+
+      - name: Sign dylib
+        run: ldid -S libWeChatTwitter.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WeChatTwitter-dylib
+          path: libWeChatTwitter.dylib
