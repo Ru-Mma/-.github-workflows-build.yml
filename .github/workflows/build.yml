@@ -5,18 +5,38 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - name: Install Theos & SDKs (retry on fail)
+      - name: Install Theos & SDKs (with verification)
         run: |
+          # 克隆 Theos，失败重试
           for i in 1 2 3; do
             echo "Try $i: cloning theos..."
             git clone --recursive --depth 1 https://github.com/theos/theos.git ~/theos && break || sleep 10
           done
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "PERL5LIB=$HOME/theos/lib" >> $GITHUB_ENV
+
+          # 克隆 SDKs，失败重试
           for i in 1 2 3; do
             echo "Try $i: cloning sdks..."
             git clone --depth 1 https://github.com/theos/sdks.git ~/theos/sdks && break || sleep 10
           done
+
+          # 关键：找到 SDK 路径并验证
+          SDK_PATH=$(find ~/theos/sdks -name "iPhoneOS*.sdk" -type d 2>/dev/null | head -1)
+          if [ -z "$SDK_PATH" ]; then
+            echo "ERROR: No iPhoneOS SDK found! Listing contents:"
+            ls -R ~/theos/sdks || echo "sdks directory empty"
+            exit 1
+          fi
+
+          # 验证 SDK 必须包含 UIKit 头文件
+          if [ ! -f "$SDK_PATH/System/Library/Frameworks/UIKit.framework/Headers/UIView.h" ]; then
+            echo "ERROR: SDK at $SDK_PATH does not contain UIKit headers!"
+            exit 1
+          fi
+
+          echo "SDK=$SDK_PATH" >> $GITHUB_ENV
+          echo "Using SDK: $SDK_PATH"
           brew install ldid
 
       - name: Create lightweight substrate header
@@ -654,8 +674,10 @@ jobs:
           test -s Tweak.mm || { echo "Logos conversion failed"; exit 1; }
 
       - name: Compile dylib
+        env:
+          SDK: ${{ env.SDK }}
         run: |
-          SDK=$(find ~/theos/sdks -name "*.sdk" | head -1)
+          echo "Compiling with SDK: $SDK"
           clang++ \
             -arch arm64 \
             -dynamiclib \
