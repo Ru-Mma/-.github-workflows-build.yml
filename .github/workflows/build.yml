@@ -5,24 +5,18 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-
-- name: Install Theos & SDKs (retry on fail)
+      - name: Install Theos & SDKs (retry on fail)
         run: |
-          # 克隆 Theos，如果失败自动重试
           for i in 1 2 3; do
             echo "Try $i: cloning theos..."
             git clone --recursive --depth 1 https://github.com/theos/theos.git ~/theos && break || sleep 10
           done
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "PERL5LIB=$HOME/theos/lib" >> $GITHUB_ENV
-
-          # 克隆 SDKs，同样重试
           for i in 1 2 3; do
             echo "Try $i: cloning sdks..."
             git clone --depth 1 https://github.com/theos/sdks.git ~/theos/sdks && break || sleep 10
           done
-
           brew install ldid
 
       - name: Create lightweight substrate header
@@ -38,10 +32,10 @@ jobs:
           EOF
           echo "CPATH=$(pwd)/sub:$CPATH" >> $GITHUB_ENV
 
-      - name: Write complete Tweak.xm (fixed)
+      - name: Write complete Tweak.xm
         run: |
           cat > Tweak.xm << 'TWEAKEOF'
-          // 私有类声明，避免编译报错
+          // Private class declarations
           @interface ChatInputView : UIView @end
           @interface MMUILabel : UILabel @end
           @interface MMNavigationItem : UINavigationItem @end
