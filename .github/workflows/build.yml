@@ -7,12 +7,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Theos & SDKs
+- name: Install Theos & SDKs (retry on fail)
         run: |
-          git clone --recursive https://github.com/theos/theos.git ~/theos
+          # 克隆 Theos，如果失败自动重试
+          for i in 1 2 3; do
+            echo "Try $i: cloning theos..."
+            git clone --recursive --depth 1 https://github.com/theos/theos.git ~/theos && break || sleep 10
+          done
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "PERL5LIB=$HOME/theos/lib" >> $GITHUB_ENV
-          git clone https://github.com/theos/sdks.git ~/theos/sdks
+
+          # 克隆 SDKs，同样重试
+          for i in 1 2 3; do
+            echo "Try $i: cloning sdks..."
+            git clone --depth 1 https://github.com/theos/sdks.git ~/theos/sdks && break || sleep 10
+          done
+
           brew install ldid
 
       - name: Create lightweight substrate header
